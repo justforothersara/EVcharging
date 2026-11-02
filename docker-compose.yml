@@ -1,0 +1,90 @@
+# 新竹市充電站數據分析平台：本機開發用（階段 1）
+# 啟動：docker compose up -d --build
+
+# beat 和 4 個 worker 共用的設定
+x-app: &app
+  build: .
+  image: evcharging:latest
+  environment:
+    CELERY_BROKER_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672//
+    MYSQL_HOST: mysql
+    MYSQL_PORT: "3306"
+    MYSQL_USER: ${MYSQL_USER}
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    MYSQL_DATABASE: ${MYSQL_DATABASE}
+    TDX_CLIENT_ID: ${TDX_CLIENT_ID}
+    TDX_CLIENT_SECRET: ${TDX_CLIENT_SECRET}
+    ARCHIVE_TARGET: local
+    ARCHIVE_DIR: /data/archive
+  depends_on:
+    rabbitmq:
+      condition: service_healthy
+    mysql:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "127.0.0.1:15672:15672"   # 管理介面
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Taipei
+    command: ["--default-time-zone=+08:00"]
+    ports:
+      - "127.0.0.1:3307:3306"     # 讓你在 Mac 上用工具查詢
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 第一次啟動時自動建立 5 張資料表
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  beat:
+    <<: *app
+    command: celery -A crawler.celery_app beat --loglevel=INFO --schedule /tmp/celerybeat-schedule
+
+  worker-collect:
+    <<: *app
+    command: celery -A crawler.celery_app worker -Q collect -c 1 -n collect@%h --loglevel=INFO
+
+  worker-sync:
+    <<: *app
+    command: celery -A crawler.celery_app worker -Q sync -c 1 -n sync@%h --loglevel=INFO
+
+  worker-aggregate:
+    <<: *app
+    command: celery -A crawler.celery_app worker -Q aggregate -c 1 -n aggregate@%h --loglevel=INFO
+
+  worker-archive:
+    <<: *app
+    command: celery -A crawler.celery_app worker -Q archive -c 1 -n archive@%h --loglevel=INFO
+    volumes:
+      - archive_data:/data/archive
+
+volumes:
+  rabbitmq_data:
+  mysql_data:
+  archive_data:

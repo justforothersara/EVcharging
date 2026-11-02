@@ -69,6 +69,17 @@ def parse_time(value):
         return None
 
 
+def clean(value):
+    """把空字串（包含只有空白的字串）轉成 None，存進資料庫就是 NULL。
+
+    也會去掉頭尾多餘的空白，例如 " 東區 " → "東區"。
+    """
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    return value
+
+
 def tdx_get(path):
     """取得 TDX Token 後呼叫指定的 API，回傳 response。
 
@@ -256,35 +267,36 @@ def sync_stations():
             str(address.get(key) or "")
             for key in ("City", "Town", "Road", "Lane", "Alley", "No")
         )
+        # 文字欄位都經過 clean()，空字串一律存成 NULL
         station_rows.append((
-            item.get("StationID"),
-            item.get("OperatorID"),
-            (item.get("StationName") or {}).get("Zh_tw"),
-            address.get("Town"),
-            full_address or place,
+            clean(item.get("StationID")),
+            clean(item.get("OperatorID")),
+            clean((item.get("StationName") or {}).get("Zh_tw")),
+            clean(address.get("Town")),
+            clean(full_address) or clean(place),
             item.get("PositionLat"),
             item.get("PositionLon"),
             item.get("OperationType"),
             item.get("Spaces"),
             item.get("ChargingPoints"),
-            item.get("ServiceTime"),
-            item.get("ChargingRate"),
-            item.get("ParkingRate"),
+            clean(item.get("ServiceTime")),
+            clean(item.get("ChargingRate")),
+            clean(item.get("ParkingRate")),
             synced_at,
         ))
 
     point_rows = [
         (
-            item.get("StationID"),
-            item.get("ChargingPointID"),
-            item.get("OperatorID"),
-            item.get("Floor"),
+            clean(item.get("StationID")),
+            clean(item.get("ChargingPointID")),
+            clean(item.get("OperatorID")),
+            clean(item.get("Floor")),
             json.dumps(item.get("Connectors"), ensure_ascii=False),
             json.dumps(item.get("Payment"), ensure_ascii=False),
             synced_at,
         )
         for item in points
-        if item.get("StationID") and item.get("ChargingPointID")
+        if clean(item.get("StationID")) and clean(item.get("ChargingPointID"))
     ]
 
     # 有就更新、沒有就新增

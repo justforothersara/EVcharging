@@ -1,0 +1,10 @@
+# 帳密不能被打包進映像檔
+.env
+
+# 本機環境與資料，映像檔裡不需要
+.venv/
+data/
+.git/
+__pycache__/
+*.pyc
+.DS_Store
