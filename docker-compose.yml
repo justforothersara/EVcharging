@@ -47,6 +47,9 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      # 給 005_readonly_user.sh 建立唯讀帳號用
+      MYSQL_RO_USER: ${MYSQL_RO_USER}
+      MYSQL_RO_PASSWORD: ${MYSQL_RO_PASSWORD}
       TZ: Asia/Taipei
     command: ["--default-time-zone=+08:00"]
     ports:
