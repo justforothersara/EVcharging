@@ -41,6 +41,7 @@ app.conf.task_routes = {
     "crawler.tasks.sync_stations": {"queue": "sync"},
     "crawler.tasks.aggregate_hourly": {"queue": "aggregate"},
     "crawler.tasks.purge_old_snapshots": {"queue": "aggregate"},
+    "crawler.tasks.build_events": {"queue": "aggregate"},
     "crawler.tasks.archive_raw": {"queue": "archive"},
 }
 
@@ -64,5 +65,9 @@ app.conf.beat_schedule = {
     "purge-old-snapshots": {
         "task": "crawler.tasks.purge_old_snapshots",
         "schedule": crontab(hour=4, minute=0),
+    },
+    "build-events": {
+        "task": "crawler.tasks.build_events",
+        "schedule": crontab(hour=0, minute=15),
     },
 }

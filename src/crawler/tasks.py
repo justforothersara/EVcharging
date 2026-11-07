@@ -1,10 +1,11 @@
 """
-5 個 Celery 任務
+6 個 Celery 任務
 
 佇列 collect  ：collect_live_status  每 10 分鐘抓即時狀態
 佇列 sync     ：sync_stations        每天 22:00 同步充電站、充電樁
 佇列 aggregate：aggregate_hourly     每小時第 5 分鐘彙總上一個小時
                purge_old_snapshots  每天 04:00 刪除 6 個月前的快照
+               build_events         每天 00:15 從快照重建狀態事件
 佇列 archive  ：archive_raw          由前兩個任務送出，封存原始資料
 """
 
@@ -345,8 +346,10 @@ def sync_stations():
 
 @app.task
 def aggregate_hourly(hour_start=None):
-    """任務 3（佇列 aggregate，每小時第 5 分鐘）：把快照彙總到 connector_hourly_usage。
+    """任務 3（佇列 aggregate，每小時第 5 分鐘）：把快照彙總到 2 張每小時彙總表。
 
+    connector_hourly_usage：每支充電槍的可使用、佔用、故障次數
+    station_hourly_usage  ：每個充電站「全站滿了」「全站停擺」的批次數
     沒有指定 hour_start 時，彙總上一個小時；也可以手動指定某個小時重算。
     """
     if hour_start is None:
@@ -373,9 +376,36 @@ def aggregate_hourly(hour_start=None):
             (hour_start, hour_start, hour_start),
         )
         inserted = cursor.rowcount
+
+        # 充電站：先算出每一批每一站的狀態，再加總成這個小時
+        cursor.execute(
+            "DELETE FROM station_hourly_usage WHERE hour_start = %s",
+            (hour_start,),
+        )
+        cursor.execute(
+            "INSERT INTO station_hourly_usage "
+            "(hour_start, station_id, connectors, samples, full_cnt, down_cnt) "
+            "SELECT %s, station_id, MAX(connectors), COUNT(*), "
+            # 全站滿了：沒有可使用的槍，且至少 1 支佔用（全部故障不算滿）
+            "SUM(available = 0 AND occupied > 0), "
+            # 全站停擺：所有的槍都故障
+            "SUM(faulted = connectors) "
+            "FROM ("
+            "  SELECT batch_at, station_id, COUNT(*) AS connectors, "
+            "  SUM(connector_status = 1) AS available, "
+            "  SUM(connector_status = 2) AS occupied, "
+            "  SUM(connector_status = 3) AS faulted "
+            "  FROM connector_status_snapshot "
+            "  WHERE batch_at >= %s AND batch_at < %s + INTERVAL 1 HOUR "
+            "  GROUP BY batch_at, station_id"
+            ") AS per_batch "
+            "GROUP BY station_id",
+            (hour_start, hour_start, hour_start),
+        )
+        stations = cursor.rowcount
         conn.commit()
 
-    logger.info("%s 彙總完成：%d 支充電槍", hour_start, inserted)
+    logger.info("%s 彙總完成：%d 支充電槍、%d 個充電站", hour_start, inserted, stations)
 
 
 # 6. 任務 4：清理 6 個月前的快照（佇列 aggregate）
@@ -416,3 +446,57 @@ def archive_raw(kind, batch_at, raw_text):
         file.write(raw_text)
 
     logger.info("封存完成：%s（%d bytes）", path, path.stat().st_size)
+
+
+# 8. 任務 6：建立狀態事件（佇列 aggregate）
+
+
+@app.task
+def build_events():
+    """任務 6（佇列 aggregate，每天 00:15）：從快照重建 connector_event。
+
+    把同一支槍「連續相同狀態」的快照合併成一個事件（只保留佔用和故障）。
+    中間缺了批次（例如停機）就視為新的事件。
+    每次都從全部快照重算，不用處理跨午夜的事件，重算幾次結果都一樣；
+    代價是 6 個月前的快照被清掉後，對應的事件也會跟著消失。
+    """
+    built_at = now_taipei()
+
+    with connect_db() as conn, conn.cursor() as cursor:
+        # 刪除和新增在同一個交易裡，Redash 查詢時不會看到一半的資料
+        cursor.execute("DELETE FROM connector_event")
+        cursor.execute(
+            "INSERT INTO connector_event "
+            "(station_id, charging_point_id, connector_id, event_type, "
+            "start_at, end_at, samples, built_at) "
+            "SELECT station_id, charging_point_id, connector_id, "
+            "IF(connector_status = 2, 'occupied', 'faulted'), "
+            "MIN(batch_at), MAX(batch_at), COUNT(*), %s "
+            "FROM ("
+            # 第 2 步：累加「是不是新事件」，同一個事件會得到同一個編號
+            "  SELECT *, SUM(is_new) OVER ("
+            "    PARTITION BY station_id, charging_point_id, connector_id "
+            "    ORDER BY batch_at) AS event_no "
+            "  FROM ("
+            # 第 1 步：和同一支槍的上一批比較，狀態改變或中間缺批次就是新事件
+            "    SELECT station_id, charging_point_id, connector_id, "
+            "    batch_at, connector_status, "
+            "    (LAG(batch_at) OVER w IS NULL "
+            "     OR LAG(connector_status) OVER w <> connector_status "
+            "     OR LAG(batch_at) OVER w <> batch_at - INTERVAL 10 MINUTE"
+            "    ) AS is_new "
+            "    FROM connector_status_snapshot "
+            "    WINDOW w AS ("
+            "      PARTITION BY station_id, charging_point_id, connector_id "
+            "      ORDER BY batch_at)"
+            "  ) AS flagged"
+            ") AS numbered "
+            "WHERE connector_status IN (2, 3) "
+            "GROUP BY station_id, charging_point_id, connector_id, "
+            "event_no, connector_status",
+            (built_at,),
+        )
+        inserted = cursor.rowcount
+        conn.commit()
+
+    logger.info("事件重建完成：%d 筆", inserted)

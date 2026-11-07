@@ -53,8 +53,8 @@ services:
       - "127.0.0.1:3307:3306"     # 讓你在 Mac 上用工具查詢
     volumes:
       - mysql_data:/var/lib/mysql
-      # 第一次啟動時自動建立 5 張資料表
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      # 第一次啟動時，依照編號自動執行所有 migration
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
       interval: 10s
