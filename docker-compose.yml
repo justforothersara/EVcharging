@@ -23,6 +23,28 @@ x-app: &app
       condition: service_healthy
   restart: unless-stopped
 
+# Redash 3 個服務共用的環境變數
+x-redash-env: &redash-env
+  PYTHONUNBUFFERED: "0"
+  REDASH_LOG_LEVEL: INFO
+  REDASH_REDIS_URL: redis://redis:6379/0
+  REDASH_DATABASE_URL: postgresql://postgres:${REDASH_POSTGRES_PASSWORD}@postgres/postgres
+  REDASH_COOKIE_SECRET: ${REDASH_COOKIE_SECRET}
+  REDASH_SECRET_KEY: ${REDASH_SECRET_KEY}
+  REDASH_ENFORCE_CSRF: "true"
+  REDASH_GUNICORN_TIMEOUT: "60"
+
+# Redash 3 個服務共用的設定
+x-redash: &redash
+  image: redash/redash:26.9.0
+  environment: *redash-env
+  depends_on:
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
 services:
   rabbitmq:
     image: rabbitmq:4.1-management
@@ -87,7 +109,54 @@ services:
     volumes:
       - archive_data:/data/archive
 
+  # ---- Redash（Dashboard）----
+  redash-server:
+    <<: *redash
+    command: server
+    environment:
+      <<: *redash-env
+      REDASH_WEB_WORKERS: "2"
+    ports:
+      - "127.0.0.1:5001:5000"     # Redash 網頁（Mac 的 5000 被 AirPlay 占用）
+
+  redash-scheduler:
+    <<: *redash
+    command: scheduler
+
+  # 只有一個人使用，官方的 3 個 worker 合併成 1 個，負責全部佇列
+  redash-worker:
+    <<: *redash
+    command: worker
+    environment:
+      <<: *redash-env
+      QUEUES: queries,scheduled_queries,schemas,periodic,emails,default
+      WORKERS_COUNT: "2"
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Redash 自己的設定資料（查詢、圖表、帳號），不是充電站資料
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: ${REDASH_POSTGRES_PASSWORD}
+    volumes:
+      - redash_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
   rabbitmq_data:
   mysql_data:
   archive_data:
+  redash_postgres_data:
