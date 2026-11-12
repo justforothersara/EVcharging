@@ -456,7 +456,11 @@ def build_events():
     """任務 6（佇列 aggregate，每天 00:15）：從快照重建 connector_event。
 
     把同一支槍「連續相同狀態」的快照合併成一個事件（只保留佔用和故障）。
-    中間缺了批次（例如停機）就視為新的事件。
+    中間缺了 1～2 批（間隔 ≤ 30 分鐘）而且前後狀態相同，視為同一個事件
+    （例如 10:20 故障、10:30 沒資料、10:40 故障 → 同一次故障）；
+    前後狀態不同時，缺的批次不屬於任何事件（未知，不算入）；
+    缺 3 批以上（例如停機）就視為新的事件。
+    持續時間請用 end_at − start_at + 10 分鐘；samples 是實際收到的樣本數。
     每次都從全部快照重算，不用處理跨午夜的事件，重算幾次結果都一樣；
     代價是 6 個月前的快照被清掉後，對應的事件也會跟著消失。
     """
@@ -478,12 +482,12 @@ def build_events():
             "    PARTITION BY station_id, charging_point_id, connector_id "
             "    ORDER BY batch_at) AS event_no "
             "  FROM ("
-            # 第 1 步：和同一支槍的上一批比較，狀態改變或中間缺批次就是新事件
+            # 第 1 步：和同一支槍的上一批比較，狀態改變或中間缺 3 批以上就是新事件
             "    SELECT station_id, charging_point_id, connector_id, "
             "    batch_at, connector_status, "
             "    (LAG(batch_at) OVER w IS NULL "
             "     OR LAG(connector_status) OVER w <> connector_status "
-            "     OR LAG(batch_at) OVER w <> batch_at - INTERVAL 10 MINUTE"
+            "     OR LAG(batch_at) OVER w < batch_at - INTERVAL 30 MINUTE"
             "    ) AS is_new "
             "    FROM connector_status_snapshot "
             "    WINDOW w AS ("
